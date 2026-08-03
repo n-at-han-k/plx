@@ -1,0 +1,133 @@
+name: Build CNPG extension image
+
+# Publishes this extension as a CloudNativePG extension image — a FROM scratch
+# OCI image carrying only:
+#   /share/extension/  <name>.control and the <name>--*.sql scripts
+#   /lib/              <name>.so and any non-PostgreSQL libraries it links
+#
+# CNPG mounts that read-only at /extensions/<name> via the Kubernetes
+# ImageVolume feature and points PostgreSQL's extension_control_path at it, so
+# the database's own operand image stays stock upstream. Consuming it is two
+# lines in a Cluster:
+#
+#   spec:
+#     postgresql:
+#       extensions:
+#         - name: <name>
+#           image:
+#             reference: ghcr.io/<owner>/<name>-cnpg:<tag>
+#
+# The build lives HERE, beside the source it builds, so editing the extension
+# rebuilds the image. Consumers reference the published image and never clone
+# this repository.
+#
+# VERSION PINNING IS LOAD-BEARING. CNPG requires the extension image to match
+# the target cluster's PostgreSQL major, OS distribution and CPU architecture,
+# and a shared library is compiled against exact server headers. PG_PKG_VERSION
+# below must match the cluster's operand image. PGDG can carry two betas of the
+# same major at once and an unpinned install silently takes the newer one.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      pg_pkg_version:
+        description: 'Exact PGDG package version to build against'
+        required: false
+        default: '19~beta1-1.pgdg13+1'
+      tag:
+        description: 'Image tag to publish'
+        required: false
+        default: '19beta1'
+
+env:
+  EXT_NAME: plx
+  PG_MAJOR: '19'
+  PG_PKG_VERSION: ${{ inputs.pg_pkg_version || '19~beta1-1.pgdg13+1' }}
+  TAG: ${{ inputs.tag || '19beta1' }}
+  # Extra -dev packages this extension links against.
+  EXT_BUILD_DEPS: ''
+  # Non-PostgreSQL libraries the built module MUST link, checked after the build
+  # and bundled into the image. Space-separated soname stems.
+  EXT_NEEDED_LIBS: ''
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL ${{ env.PG_MAJOR }} headers (PGDG)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          # The setup script does not enable the component for an unreleased
+          # major, so an unreleased PG has no installation candidate without it.
+          codename=$(lsb_release -cs)
+          echo "deb https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main ${PG_MAJOR}" \
+            | sudo tee /etc/apt/sources.list.d/pgdg-${PG_MAJOR}.list
+          sudo apt-get update
+          # postgresql-client must be pinned ALONGSIDE the dev package: server-dev
+          # depends on `postgresql-client-N (= same version)`, so with two betas
+          # in the repo apt picks the newer client and calls the dependency
+          # unsatisfiable.
+          sudo apt-get install -y \
+            "postgresql-client-${PG_MAJOR}=${PG_PKG_VERSION}" \
+            "postgresql-server-dev-${PG_MAJOR}=${PG_PKG_VERSION}" \
+            ${EXT_BUILD_DEPS}
+          echo "PG_CONFIG=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          make PG_CONFIG="$PG_CONFIG"
+          make PG_CONFIG="$PG_CONFIG" install DESTDIR="$PWD/staging"
+
+      # A shared object may legitimately leave PostgreSQL's own symbols
+      # undefined — the backend provides them at load time — so "are there
+      # undefined symbols" proves nothing. What matters is whether DT_NEEDED
+      # names the libraries this module is supposed to link. Getting that wrong
+      # is silent: the build succeeds and the failure appears only as
+      # "undefined symbol: ..." when a user runs CREATE EXTENSION.
+      - name: Assemble and check the image tree
+        run: |
+          set -eux
+          mkdir -p out/lib out/share/extension
+          cp "staging/usr/lib/postgresql/${PG_MAJOR}/lib/${EXT_NAME}.so" out/lib/
+          cp "staging/usr/share/postgresql/${PG_MAJOR}/extension/${EXT_NAME}.control" out/share/extension/
+          cp staging/usr/share/postgresql/${PG_MAJOR}/extension/${EXT_NAME}--*.sql out/share/extension/
+
+          needed=$(objdump -p "out/lib/${EXT_NAME}.so" | awk '/NEEDED/{print $2}')
+          echo "DT_NEEDED: $needed"
+          for lib in ${EXT_NEEDED_LIBS}; do
+            echo "$needed" | grep -q "^${lib}\.so" || {
+              echo "REFUSING TO PUBLISH: expected ${EXT_NAME}.so to link ${lib}"
+              exit 1
+            }
+            # Bundle ONLY the declared libraries. Copying everything ldd reports
+            # drags in libpq's whole chain (libssl, libcrypto, libkrb5, ...) —
+            # megabytes the database already has, and a trap for anyone who
+            # later adds an ld_library_path entry and shadows the system TLS
+            # libraries with a frozen copy.
+            path=$(ldd "out/lib/${EXT_NAME}.so" | awk -v w="$lib" '$1 ~ "^" w "\\." {print $3}')
+            test -n "$path"
+            cp -L "$path" out/lib/
+          done
+          ls -l out/lib out/share/extension
+
+      - name: Build and push the image
+        run: |
+          set -eux
+          printf 'FROM scratch\nCOPY out/ /\n' > Dockerfile.cnpg
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/${owner}/${EXT_NAME}-cnpg"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -f Dockerfile.cnpg -t "${image}:${TAG}" -t "${image}:${{ github.sha }}" .
+          docker push "${image}:${TAG}"
+          docker push "${image}:${{ github.sha }}"
+
