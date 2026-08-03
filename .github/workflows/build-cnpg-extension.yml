@@ -62,63 +62,74 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PostgreSQL ${{ env.PG_MAJOR }} headers (PGDG)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-common
-          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          # The setup script does not enable the component for an unreleased
-          # major, so an unreleased PG has no installation candidate without it.
-          codename=$(lsb_release -cs)
-          echo "deb https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main ${PG_MAJOR}" \
-            | sudo tee /etc/apt/sources.list.d/pgdg-${PG_MAJOR}.list
-          sudo apt-get update
-          # postgresql-client must be pinned ALONGSIDE the dev package: server-dev
-          # depends on `postgresql-client-N (= same version)`, so with two betas
-          # in the repo apt picks the newer client and calls the dependency
-          # unsatisfiable.
-          sudo apt-get install -y \
-            "postgresql-client-${PG_MAJOR}=${PG_PKG_VERSION}" \
-            "postgresql-server-dev-${PG_MAJOR}=${PG_PKG_VERSION}" \
-            ${EXT_BUILD_DEPS}
-          echo "PG_CONFIG=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" >> "$GITHUB_ENV"
-
-      - name: Build
-        run: |
-          make PG_CONFIG="$PG_CONFIG"
-          make PG_CONFIG="$PG_CONFIG" install DESTDIR="$PWD/staging"
-
-      # A shared object may legitimately leave PostgreSQL's own symbols
-      # undefined — the backend provides them at load time — so "are there
-      # undefined symbols" proves nothing. What matters is whether DT_NEEDED
-      # names the libraries this module is supposed to link. Getting that wrong
-      # is silent: the build succeeds and the failure appears only as
-      # "undefined symbol: ..." when a user runs CREATE EXTENSION.
-      - name: Assemble and check the image tree
+      # COMPILE INSIDE debian:trixie, not on the Ubuntu runner.
+      #
+      # CNPG requires an extension image to match the cluster's PostgreSQL
+      # major, OS DISTRIBUTION and architecture — the operand image is
+      # ...:19beta1-standard-trixie, so the module has to be built against
+      # Debian trixie's toolchain, not the runner's Ubuntu one. The PGDG version
+      # suffix gives the same answer from the other direction: Debian packages
+      # are 19~beta1-1.pgdg13+1, Ubuntu's are ...pgdg24.04+1, so a Debian pin
+      # simply does not exist on an Ubuntu runner.
+      - name: Build against PostgreSQL ${{ env.PG_MAJOR }} on Debian trixie
         run: |
           set -eux
-          mkdir -p out/lib out/share/extension
-          cp "staging/usr/lib/postgresql/${PG_MAJOR}/lib/${EXT_NAME}.so" out/lib/
-          cp "staging/usr/share/postgresql/${PG_MAJOR}/extension/${EXT_NAME}.control" out/share/extension/
-          cp staging/usr/share/postgresql/${PG_MAJOR}/extension/${EXT_NAME}--*.sql out/share/extension/
+          docker run --rm \
+            -v "$PWD:/src" -w /src \
+            -e PG_MAJOR -e PG_PKG_VERSION -e EXT_NAME -e EXT_BUILD_DEPS -e EXT_NEEDED_LIBS \
+            debian:trixie bash -eux -c '
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl gnupg build-essential postgresql-common binutils
+              /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+              # The setup script does not enable the component for an
+              # unreleased major, so PG 19 has no candidate without this.
+              echo "deb https://apt.postgresql.org/pub/repos/apt trixie-pgdg main ${PG_MAJOR}" \
+                > /etc/apt/sources.list.d/pgdg-${PG_MAJOR}.list
+              apt-get update
+              # postgresql-client must be pinned ALONGSIDE server-dev: server-dev
+              # depends on the client at exactly the same version, so with two
+              # betas of one major in the repo an unpinned install takes the
+              # newer client and apt calls the dependency unsatisfiable.
+              apt-get install -y --no-install-recommends \
+                "postgresql-client-${PG_MAJOR}=${PG_PKG_VERSION}" \
+                "postgresql-server-dev-${PG_MAJOR}=${PG_PKG_VERSION}" \
+                ${EXT_BUILD_DEPS}
 
-          needed=$(objdump -p "out/lib/${EXT_NAME}.so" | awk '/NEEDED/{print $2}')
-          echo "DT_NEEDED: $needed"
-          for lib in ${EXT_NEEDED_LIBS}; do
-            echo "$needed" | grep -q "^${lib}\.so" || {
-              echo "REFUSING TO PUBLISH: expected ${EXT_NAME}.so to link ${lib}"
-              exit 1
-            }
-            # Bundle ONLY the declared libraries. Copying everything ldd reports
-            # drags in libpq's whole chain (libssl, libcrypto, libkrb5, ...) —
-            # megabytes the database already has, and a trap for anyone who
-            # later adds an ld_library_path entry and shadows the system TLS
-            # libraries with a frozen copy.
-            path=$(ldd "out/lib/${EXT_NAME}.so" | awk -v w="$lib" '$1 ~ "^" w "\\." {print $3}')
-            test -n "$path"
-            cp -L "$path" out/lib/
-          done
-          ls -l out/lib out/share/extension
+              PG_CONFIG="/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config"
+              make PG_CONFIG="$PG_CONFIG"
+              make PG_CONFIG="$PG_CONFIG" install DESTDIR=/src/staging
+
+              mkdir -p /src/out/lib /src/out/share/extension
+              cp "/src/staging/usr/lib/postgresql/${PG_MAJOR}/lib/${EXT_NAME}.so" /src/out/lib/
+              cp "/src/staging/usr/share/postgresql/${PG_MAJOR}/extension/${EXT_NAME}.control" /src/out/share/extension/
+              cp /src/staging/usr/share/postgresql/${PG_MAJOR}/extension/${EXT_NAME}--*.sql /src/out/share/extension/
+
+              # A shared object may legitimately leave PostgreSQL own symbols
+              # undefined (the backend provides them at load time), so "are
+              # there undefined symbols" proves nothing. What matters is that
+              # DT_NEEDED names the libraries this module must link. Getting it
+              # wrong is silent: the build succeeds and the failure appears only
+              # as "undefined symbol: ..." at CREATE EXTENSION.
+              needed=$(objdump -p "/src/out/lib/${EXT_NAME}.so" | awk "/NEEDED/{print \$2}")
+              echo "DT_NEEDED: $needed"
+              for lib in ${EXT_NEEDED_LIBS}; do
+                echo "$needed" | grep -q "^${lib}\." || {
+                  echo "REFUSING TO PUBLISH: expected ${EXT_NAME}.so to link ${lib}"
+                  exit 1
+                }
+                # Bundle ONLY the declared libraries. Copying everything ldd
+                # reports drags in libpq whole chain (libssl, libcrypto,
+                # libkrb5, ...) — megabytes the database already has, and a trap
+                # for anyone who later adds an ld_library_path entry and shadows
+                # the system TLS libraries with a frozen copy.
+                path=$(ldd "/src/out/lib/${EXT_NAME}.so" | awk -v w="$lib" "\$1 ~ \"^\" w \"[.]\" {print \$3}")
+                test -n "$path"
+                cp -L "$path" /src/out/lib/
+              done
+              ls -l /src/out/lib /src/out/share/extension
+            '
+          sudo chown -R "$USER" out staging
 
       - name: Build and push the image
         run: |
