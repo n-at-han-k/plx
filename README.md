@@ -173,10 +173,12 @@ PostgreSQL 18-versus-17 scaling measurements, are in
 
 ## Requirements
 
-- PostgreSQL 13 to 18.
+- PostgreSQL 13 to 19.
 
-plx is tested against PostgreSQL 13, 14, 15, 16, 17, and 18. The full regression
-suite passes on each. See [doc/COMPATIBILITY.md](doc/COMPATIBILITY.md).
+plx is tested against PostgreSQL 13, 14, 15, 16, 17, 18, and 19. The full
+regression suite passes on each. PostgreSQL 19 is still in beta; it builds with
+no source changes and all 13 regression targets pass, but treat it as
+provisional until 19 is released. See [doc/COMPATIBILITY.md](doc/COMPATIBILITY.md).
 
 ## Build and install
 

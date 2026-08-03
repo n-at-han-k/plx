@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [13, 14, 15, 16, 17, 18]
+        pg: [13, 14, 15, 16, 17, 18, 19]
 
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +23,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          # 19 is still a beta. Its packages are published to the pgdg component
+          # for the major (".../apt <suite>-pgdg main 19"), which the setup script
+          # above does not enable on its own, so add it explicitly. Harmless once
+          # 19 goes GA and the script starts enabling it.
+          if [ "${{ matrix.pg }}" -ge 19 ]; then
+            codename=$(lsb_release -cs)
+            echo "deb https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main ${{ matrix.pg }}" \
+              | sudo tee /etc/apt/sources.list.d/pgdg-${{ matrix.pg }}.list
+            sudo apt-get update
+          fi
           sudo apt-get install -y \
             postgresql-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }}

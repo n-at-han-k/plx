@@ -5,7 +5,12 @@
 plx supports PostgreSQL 13 through 18 (released), and builds and passes on the
 19 and 20 development lines. The full pg_regress suite (plxruby, plxphp, plxjs,
 plxpython3, plxgo, plxcobol, plxplsql, plxts, plxtsql, and the rejection tests)
-passes on each of PostgreSQL 13 through 18, plus 19 and 20 built from source.
+passes on each of PostgreSQL 13 through 19, plus 20 built from source.
+
+PostgreSQL 19 is covered by CI as of this change, installed from the PGDG
+packages rather than built from source, so the packaged beta is exercised on the
+same footing as the released majors. It needs no source changes: the build is
+clean (no errors, no warnings) and all 13 regression targets pass.
 
 | PostgreSQL | Status | string builder |
 |------------|--------|----------------|
@@ -15,7 +20,7 @@ passes on each of PostgreSQL 13 through 18, plus 19 and 20 built from source.
 | 16 | pass | correct, not accelerated |
 | 17 | pass | correct, not accelerated |
 | 18 | pass | accelerated (amortized O(1)) |
-| 19 (beta) | pass (from source) | accelerated (amortized O(1)) |
+| 19 (beta) | pass (CI, PGDG packages) | accelerated (amortized O(1)) |
 | 20 (devel) | pass (from source) | accelerated (amortized O(1)) |
 
 PostgreSQL 19 and 20 compile with a C23 toolchain (for example gcc 15), where

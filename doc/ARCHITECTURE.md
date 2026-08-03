@@ -70,7 +70,7 @@ and delegates to plpgsql's own inline handler with a rebuilt `InlineCodeBlock`.
 
 The only symbol that fmgr resolves from another module is
 `plpgsql_call_handler`, which is a global fmgr entry point in every supported
-release (PostgreSQL 13 to 18). plx does not call any plpgsql-internal symbol
+release (PostgreSQL 13 to 19). plx does not call any plpgsql-internal symbol
 (the compiler, executor, or scanner functions), so it does not depend on the
 symbol visibility of those internals. See [COMPATIBILITY.md](COMPATIBILITY.md).
 
