@@ -2,3 +2,18 @@ comment = 'plx (plExcellent): dialect-pluggable procedural language over plpgsql
 default_version = '1.3.1'
 module_pathname = '$libdir/plx'
 relocatable = true
+# Installable by a database owner rather than only by a superuser.
+#
+# This is the same position plpgsql itself takes, for the same reason: every
+# language plx registers is TRUSTED (pg_language.lanpltrusted is true for all
+# nine dialects), and a plx function is transpiled to plpgsql and executed by
+# the plpgsql handler — no interpreter is loaded into the backend and no
+# untrusted language is created. The elevated privilege a trusted extension
+# needs here is CREATE LANGUAGE, which is exactly what plpgsql's own control
+# file uses it for.
+#
+# Without this, CREATE EXTENSION plx requires superuser, which breaks any setup
+# where the application role owns its database but is not a superuser: a Rails
+# db:schema:load against a schema carrying `enable_extension "plx"` fails
+# outright, so a fresh test database or a new install cannot be built.
+trusted = true
